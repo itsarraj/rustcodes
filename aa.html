@@ -1,0 +1,2042 @@
+import React from 'react';
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
+import { toast } from 'react-toastify';
+import axiosInstance from '../api/axios';
+import CrisisAlerts from '../pages/CrisisAlerts';
+
+// Mock dependencies
+jest.mock('react-toastify', () => ({
+  toast: {
+    success: jest.fn(),
+    error: jest.fn(),
+    warning: jest.fn(),
+  },
+}));
+
+jest.mock('../api/axios', () => ({
+  get: jest.fn(),
+  post: jest.fn(),
+  patch: jest.fn(),
+  delete: jest.fn(),
+}));
+
+// Mock data
+const mockAlerts = [
+  {
+    AlertID: 1,
+    AlertName: 'Signal Failure',
+    StartDateTime: '2025-05-18T06:30:00.000Z',
+    EndDateTime: '2025-05-18T10:30:00.000Z',
+    AlertText: 'Signal failure detected at Junction A...',
+    IsActive: true,
+    ModifiedBy: 'EXS822',
+    ModifiedAt: '2025-05-19T04:59:46.910Z',
+  },
+  {
+    AlertID: 6,
+    AlertName: 'ValidAlertUpdate',
+    StartDateTime: '2025-06-01T10:00:00.000Z',
+    EndDateTime: '2025-06-01T12:00:00.000Z',
+    AlertText: 'This is a valid test alert.',
+    IsActive: true,
+    ModifiedBy: 'EXS822',
+    ModifiedAt: '2025-05-19T11:19:28.007Z',
+  },
+];
+
+const createMockStore = (preloadedState) => {
+  return configureStore({
+    reducer: {
+      session: (state = preloadedState?.session || {}, action) => state,
+    },
+    preloadedState,
+  });
+};
+
+describe('CrisisAlerts Component', () => {
+  let store;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    axiosInstance.get.mockResolvedValue({ data: mockAlerts });
+    axiosInstance.post.mockResolvedValue({ data: 'Created' });
+    axiosInstance.patch.mockResolvedValue({ data: {} });
+    axiosInstance.delete.mockResolvedValue({ data: {} });
+
+    store = createMockStore({
+      session: {
+        user: {
+          roles: [
+            {
+              name: 'Admin',
+              access: [{ module: 'CrisisAlerts', levels: ['Read', 'Modify'] }],
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  test('renders and fetches alerts', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await waitFor(() => {
+      expect(axiosInstance.get).toHaveBeenCalledWith('/api/crisisAlerts');
+    });
+
+    expect(await screen.findByText('Signal Failure')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Signal failure detected at Junction A/i)
+    ).toBeInTheDocument();
+  });
+
+  test('handles permission restrictions', async () => {
+    const noPermStore = createMockStore({
+      session: { user: { roles: [] } },
+    });
+
+    render(
+      <Provider store={noPermStore}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText('Add New Alert')).not.toBeInTheDocument();
+      expect(screen.queryByText('Signal Failure')).not.toBeInTheDocument();
+    });
+  });
+
+  test('adds new alert successfully', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: /Add New Alert/i })
+    );
+
+    // Use clear before typing to ensure the field is empty
+    const nameInput = screen.getByLabelText(/Alert Name/i);
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, 'New Crisis');
+
+    // For date inputs, we need a different approach as userEvent.type may not work reliably
+    const startDateInput = screen.getByLabelText(/Start Date\/Time/i);
+    const endDateInput = screen.getByLabelText(/End Date\/Time/i);
+
+    // Use fireEvent instead for more direct control over input values
+    fireEvent.change(startDateInput, { target: { value: '2025-06-01T10:00' } });
+    fireEvent.change(endDateInput, { target: { value: '2025-06-01T12:00' } });
+
+    // Clear and fill text area
+    const textArea = screen.getByLabelText(/Alert Text/i);
+    await userEvent.clear(textArea);
+    await userEvent.type(textArea, 'New alert description');
+
+    // Submit form
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+
+    await waitFor(() => {
+      expect(axiosInstance.post).toHaveBeenCalledWith(
+        '/api/crisisAlerts',
+        expect.objectContaining({
+          alertName: 'New Crisis',
+          alertText: 'New alert description',
+          isActive: true,
+        })
+      );
+
+      // Verify that startDateTime and endDateTime exist but don't check exact values
+      const call = axiosInstance.post.mock.calls[0][1];
+      expect(call).toHaveProperty('startDateTime');
+      expect(call).toHaveProperty('endDateTime');
+
+      // Verify endDateTime is after startDateTime (regardless of exact values)
+      expect(new Date(call.endDateTime) > new Date(call.startDateTime)).toBe(
+        true
+      );
+    });
+  });
+
+  test('edits existing alert', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const editButtons = await screen.findAllByRole('button', { name: /Edit/i });
+    await userEvent.click(editButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Alert Name/i)).toHaveValue(
+        'ValidAlertUpdate'
+      );
+    });
+
+    await userEvent.clear(screen.getByLabelText(/Alert Name/i));
+    await userEvent.type(screen.getByLabelText(/Alert Name/i), 'Updated Alert');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Save Changes/i })
+    );
+
+    await waitFor(() => {
+      expect(axiosInstance.patch).toHaveBeenCalledWith(
+        '/api/crisisAlerts/6',
+        expect.objectContaining({ alertName: 'Updated Alert' })
+      );
+      expect(toast.success).toHaveBeenCalledWith('Alert updated successfully');
+    });
+  });
+
+  test('validates form inputs', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+
+    // Fill in alert name to prevent other validation errors from interfering
+    const nameInput = screen.getByLabelText(/Alert Name/i);
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, 'Test Alert');
+
+    // Fill in alert text
+    const textArea = screen.getByLabelText(/Alert Text/i);
+    await userEvent.clear(textArea);
+    await userEvent.type(textArea, 'Some alert text');
+
+    // Set end date before start date to trigger validation error
+    const startDateInput = screen.getByLabelText(/Start Date\/Time/i);
+    const endDateInput = screen.getByLabelText(/End Date\/Time/i);
+
+    fireEvent.change(startDateInput, { target: { value: '2025-06-01T12:00' } });
+    fireEvent.change(endDateInput, { target: { value: '2025-06-01T10:00' } });
+
+    // Submit form
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'End date must be after start date'
+      );
+    });
+  });
+
+  test('deletes alert with confirmation', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await screen.findByText('Signal Failure'); // Wait for data to load
+
+    const deleteButtons = await screen.findAllByTestId('delete-button');
+    await userEvent.click(deleteButtons[0]);
+
+    // Try different selectors to find the confirmation button
+    // Option 1: Use a more generic selector
+    const confirmButton = await screen.findByTestId('confirm-dialog');
+    await userEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(axiosInstance.delete).toHaveBeenCalledWith('/api/crisisAlerts/6');
+      expect(toast.success).toHaveBeenCalledWith('Alert deleted successfully');
+    });
+  });
+
+  test('handles API errors', async () => {
+    axiosInstance.get.mockRejectedValueOnce(new Error('API Error'));
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed to fetch alerts');
+    });
+  });
+
+  test('handles pagination correctly', async () => {
+    const longList = Array.from({ length: 15 }, (_, i) => ({
+      AlertID: i + 1,
+      AlertName: `Alert ${i + 1}`,
+      StartDateTime: '2025-05-18T06:30:00.000Z',
+      EndDateTime: '2025-05-18T10:30:00.000Z',
+      AlertText: `Alert text ${i + 1}`,
+      IsActive: true,
+    }));
+
+    axiosInstance.get.mockResolvedValue({ data: longList });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await screen.findByText('Alert 1');
+
+    const nextButton = screen.getByRole('button', { name: /Next Page/i });
+    await userEvent.click(nextButton);
+
+    expect(await screen.findByText('Alert 11')).toBeInTheDocument();
+  });
+
+  test('shows empty state', async () => {
+    axiosInstance.get.mockResolvedValue({ data: [] });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    expect(await screen.findByText(/No alerts found/i)).toBeInTheDocument();
+  });
+
+  test('formats dates correctly in UTC', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Wait for table to load
+    await screen.findByText('Signal Failure');
+
+    const dateElements = await screen.findAllByText('18 May 2025');
+    expect(dateElements.length).toBeGreaterThan(0);
+
+    // Look for the time texts directly
+    const startTimeText = await screen.findByText('08:30 am');
+    expect(startTimeText).toBeInTheDocument();
+
+    const endTimeText = await screen.findByText('12:30 pm');
+    expect(endTimeText).toBeInTheDocument();
+  });
+
+  test('cancels form when cancel button is clicked', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Cancel/i }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('validates alphanumeric alert name', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+
+    await userEvent.type(screen.getByLabelText(/Alert Name/i), 'Invalid@Alert');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Alert name must be alphanumeric'
+      );
+    });
+  });
+
+  test('toggles active status checkbox', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+
+    const checkbox = screen.getByRole('checkbox');
+    expect(checkbox).toBeChecked();
+
+    await userEvent.click(checkbox);
+    expect(checkbox).not.toBeChecked();
+  });
+  // additional tests
+  test('handles permission restrictions does not fetch data', async () => {
+    const noPermStore = createMockStore({
+      session: { user: { roles: [] } },
+    });
+
+    render(
+      <Provider store={noPermStore}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await waitFor(() => {
+      expect(axiosInstance.get).not.toHaveBeenCalled();
+      expect(screen.queryByText('Add New Alert')).not.toBeInTheDocument();
+    });
+  });
+
+  test('shows validation errors for required fields', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Alert name must be between 3-32 characters'
+      );
+      expect(toast.error).toHaveBeenCalledWith('Alert text cannot be empty');
+    });
+
+    // Remove expectations for date fields if they have default values
+    expect(toast.error).not.toHaveBeenCalledWith('Start date is required');
+    expect(toast.error).not.toHaveBeenCalledWith('End date is required');
+  });
+
+  test('handles delete API error', async () => {
+    axiosInstance.delete.mockRejectedValueOnce(new Error('Delete failed'));
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await screen.findByText('Signal Failure');
+    const deleteButtons = await screen.findAllByTestId('delete-button');
+    await userEvent.click(deleteButtons[0]);
+
+    const confirmButton = await screen.findByRole('button', {
+      name: /Confirm/i,
+    });
+    await userEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed to delete alert');
+    });
+  });
+
+  test('paginates correctly between pages', async () => {
+    const longList = Array.from({ length: 15 }, (_, i) => ({
+      AlertID: i + 1,
+      AlertName: `Alert ${i + 1}`,
+      StartDateTime: '2025-05-18T06:30:00.000Z',
+      EndDateTime: '2025-05-18T10:30:00.000Z',
+      AlertText: `Alert text ${i + 1}`,
+      IsActive: true,
+    }));
+
+    axiosInstance.get.mockResolvedValue({ data: longList });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Page 1
+    await screen.findByText('Alert 1');
+    expect(screen.getByText('Alert 10')).toBeInTheDocument();
+    expect(screen.queryByText('Alert 11')).not.toBeInTheDocument();
+
+    // Go to Page 2
+    const nextButton = screen.getByRole('button', { name: /Next Page/i });
+    await userEvent.click(nextButton);
+
+    // Page 2
+    await screen.findByText('Alert 11');
+    expect(screen.queryByText('Alert 10')).not.toBeInTheDocument();
+
+    // Go back to Page 1
+    const prevButton = screen.getByRole('button', { name: /Previous Page/i });
+    await userEvent.click(prevButton);
+    expect(await screen.findByText('Alert 1')).toBeInTheDocument();
+  });
+
+  test('sorts alerts by name', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Wait for initial data load
+    await screen.findByText('Signal Failure');
+
+    const nameHeader = screen.getByText('Name');
+
+    // First click - ascending (default order)
+    await userEvent.click(nameHeader);
+    // Second click - descending
+    await userEvent.click(nameHeader);
+
+    // Wait for sorted data to update
+    await waitFor(() => {
+      const rows = screen.getAllByRole('row');
+      const firstDataRow = rows[1]; // Skip header row
+      const cells = within(firstDataRow).getAllByRole('cell');
+      expect(cells[1]).toHaveTextContent('ValidAlertUpdate');
+    });
+  });
+
+  test('shows tooltip on text hover', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const alertNameCell = await screen.findByText('Signal Failure');
+    fireEvent.mouseEnter(alertNameCell);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Signal Failure', { selector: '.absolute.z-10' })
+      ).toBeInTheDocument();
+    });
+  });
+
+  test('rejects invalid page inputs', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const pageInput = screen.getByRole('spinbutton');
+
+    // Simulate invalid input
+    await userEvent.type(pageInput, 'abc');
+    await userEvent.click(screen.getByRole('button', { name: /Go/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Page must be between 1 and 0');
+    });
+  });
+
+  test('formats dates in UTC', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Get first data row
+    const rows = await screen.findAllByRole('row');
+    const firstDataRow = rows[1];
+
+    // Get all cells in the row
+    const cells = within(firstDataRow).getAllByRole('cell');
+  });
+
+  test('initializes form with alert data when editing', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const editButton = (
+      await screen.findAllByRole('button', { name: /Edit/i })
+    )[1];
+    await userEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Alert Name/i)).toHaveValue(
+        'Signal Failure'
+      );
+      expect(screen.getByLabelText(/Start Date\/Time/i)).toHaveValue(
+        '2025-05-18T06:30'
+      );
+    });
+  });
+
+  test('validates exact field lengths', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+
+    // Valid 3-character name
+    await userEvent.type(screen.getByLabelText(/Alert Name/i), 'abc');
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+    await waitFor(() => {
+      expect(toast.error).not.toHaveBeenCalledWith(
+        'Alert name must be between 3-32 characters'
+      );
+    });
+
+    // Invalid 2-character name
+    await userEvent.clear(screen.getByLabelText(/Alert Name/i));
+    await userEvent.type(screen.getByLabelText(/Alert Name/i), 'ab');
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Alert name must be between 3-32 characters'
+      );
+    });
+  });
+
+  test('handles API errors during create/update', async () => {
+    axiosInstance.post.mockRejectedValueOnce(new Error('Create failed'));
+    axiosInstance.patch.mockRejectedValueOnce(new Error('Update failed'));
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Test create error
+    await userEvent.click(
+      screen.getByRole('button', { name: /Add New Alert/i })
+    );
+
+    // Fill all required fields
+    await userEvent.type(screen.getByLabelText(/Alert Name/i), 'New Alert');
+    fireEvent.change(screen.getByLabelText(/Start Date\/Time/i), {
+      target: { value: '2025-06-01T10:00' },
+    });
+    fireEvent.change(screen.getByLabelText(/End Date\/Time/i), {
+      target: { value: '2025-06-01T12:00' },
+    });
+    await userEvent.type(screen.getByLabelText(/Alert Text/i), 'Test content');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Create Alert/i })
+    );
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Operation failed');
+    });
+  });
+
+  test('navigates to first/last page', async () => {
+    const longList = Array.from({ length: 25 }, (_, i) => ({
+      AlertID: i + 1,
+      AlertName: `Alert ${i + 1}`,
+      // ... other fields
+    }));
+    axiosInstance.get.mockResolvedValue({ data: longList });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await screen.findByText('Alert 1');
+
+    // Go to last page
+    const lastPageButton = screen.getByRole('button', { name: /Last Page/i });
+    await userEvent.click(lastPageButton);
+    expect(await screen.findByText('Alert 25')).toBeInTheDocument();
+
+    // Return to first page
+    const firstPageButton = screen.getByRole('button', { name: /First Page/i });
+    await userEvent.click(firstPageButton);
+    expect(await screen.findByText('Alert 1')).toBeInTheDocument();
+  });
+
+  test('hides actions for read-only users', async () => {
+    const noModifyStore = createMockStore({
+      session: {
+        user: {
+          roles: [
+            {
+              name: 'Viewer',
+              access: [{ module: 'CrisisAlerts', levels: ['Read'] }],
+            },
+          ],
+        },
+      },
+    });
+
+    render(
+      <Provider store={noModifyStore}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /Add New Alert/i })
+      ).not.toBeInTheDocument();
+      expect(screen.queryAllByRole('button', { name: /Edit/i })).toHaveLength(
+        0
+      );
+    });
+  });
+  test('shows sorting indicators correctly', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await screen.findByText('Signal Failure');
+
+    const nameHeader = screen.getByText('Name');
+
+    // Initial sort should show neutral icon
+    expect(within(nameHeader).getByTestId('sort-neutral')).toBeInTheDocument();
+
+    // First click - ascending
+    await userEvent.click(nameHeader);
+    expect(within(nameHeader).getByTestId('sort-up')).toBeInTheDocument();
+
+    // Second click - descending
+    await userEvent.click(nameHeader);
+    expect(within(nameHeader).getByTestId('sort-down')).toBeInTheDocument();
+  });
+
+  test('handles all pagination edge cases', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const input = screen.getByRole('spinbutton');
+    const goButton = screen.getByRole('button', { name: /Go/i });
+
+    // Test empty input
+    await userEvent.clear(input);
+    await userEvent.click(goButton);
+    expect(toast.error).toHaveBeenCalledWith('Page must be between 1 and 0');
+
+    // Test non-numeric input
+    await userEvent.type(input, 'abc');
+    await userEvent.click(goButton);
+    expect(toast.error).toHaveBeenCalledWith('Page must be between 1 and 0');
+
+    // Test lower boundary
+    await userEvent.type(input, '0');
+    await userEvent.click(goButton);
+    expect(toast.error).toHaveBeenCalledWith('Page must be between 1 and 0');
+
+    // Test upper boundary
+    await userEvent.type(input, '999');
+    await userEvent.click(goButton);
+    expect(toast.error).toHaveBeenCalledWith('Page must be between 1 and 0');
+  });
+
+  test('validates all form fields comprehensively', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(screen.getByText('Add New Alert'));
+
+    // Wait for input to appear
+    const alertNameInput = await screen.findByLabelText('Name');
+
+    // Test minimum length
+    await userEvent.type(alertNameInput, 'ab');
+    await userEvent.click(screen.getByText('Create Alert'));
+    expect(toast.error).toHaveBeenCalledWith(
+      'Alert name must be between 3-32 characters'
+    );
+
+    // Test special characters
+    await userEvent.clear(alertNameInput);
+    await userEvent.type(alertNameInput, 'Alert@123');
+    expect(toast.error).toHaveBeenCalledWith('Alert name must be alphanumeric');
+
+    // Test date validation
+    const startDate = screen.getByLabelText('Start Date/Time');
+    const endDate = screen.getByLabelText('End Date/Time');
+    fireEvent.change(startDate, { target: { value: '2025-06-01T12:00' } });
+    fireEvent.change(endDate, { target: { value: '2025-06-01T10:00' } });
+    expect(toast.error).toHaveBeenCalledWith(
+      'End date must be after start date'
+    );
+  });
+
+  test('sorts data correctly in both directions', async () => {
+    const mixedData = [
+      { AlertName: 'Beta', StartDateTime: '2025-05-20' },
+      { AlertName: 'Alpha', StartDateTime: '2025-05-19' },
+    ];
+    axiosInstance.get.mockResolvedValueOnce({ data: mixedData });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const nameHeader = await screen.findByText('Name');
+
+    // Initial render (default sort)
+    let firstRow = screen.getAllByRole('row')[1];
+    expect(within(firstRow).getByText('Beta')).toBeInTheDocument();
+
+    // Sort ascending
+    await userEvent.click(nameHeader);
+    firstRow = screen.getAllByRole('row')[1];
+    expect(within(firstRow).getByText('Alpha')).toBeInTheDocument();
+
+    // Sort descending
+    await userEvent.click(nameHeader);
+    firstRow = screen.getAllByRole('row')[1];
+    expect(within(firstRow).getByText('Beta')).toBeInTheDocument();
+  });
+  test('sorts by start date correctly', async () => {
+    const dateData = [
+      {
+        AlertID: 3,
+        AlertName: 'Older Alert',
+        StartDateTime: '2025-05-01T00:00:00.000Z',
+        EndDateTime: '2025-05-02T00:00:00.000Z',
+        IsActive: true,
+      },
+      {
+        AlertID: 4,
+        AlertName: 'Newer Alert',
+        StartDateTime: '2025-06-01T00:00:00.000Z',
+        EndDateTime: '2025-06-02T00:00:00.000Z',
+        IsActive: true,
+      },
+    ];
+    axiosInstance.get.mockResolvedValueOnce({ data: dateData });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const startDateHeader = await screen.findByText('Start Date/Time');
+
+    // First click - ascending
+    await userEvent.click(startDateHeader);
+    let rows = screen.getAllByRole('row');
+    expect(within(rows[1]).getByText('Older Alert')).toBeInTheDocument();
+
+    // Second click - descending
+    await userEvent.click(startDateHeader);
+    rows = screen.getAllByRole('row');
+    expect(within(rows[1])).toHaveTextContent('Newer Alert');
+  });
+
+  test('sorts by active status correctly', async () => {
+    const statusData = [
+      { AlertID: 5, AlertName: 'Inactive Alert', IsActive: false },
+      { AlertID: 6, AlertName: 'Active Alert', IsActive: true },
+    ];
+    axiosInstance.get.mockResolvedValueOnce({ data: statusData });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const activeHeader = await screen.findByText('Active');
+
+    // Sort ascending (false first)
+    await userEvent.click(activeHeader);
+    let rows = screen.getAllByRole('row');
+    expect(within(rows[1])).toHaveTextContent('Inactive Alert');
+
+    // Sort descending (true first)
+    await userEvent.click(activeHeader);
+    rows = screen.getAllByRole('row');
+    expect(within(rows[1])).toHaveTextContent('Active Alert');
+  });
+
+  test('handles valid page number input', async () => {
+    const longList = Array.from({ length: 15 }, (_, i) => ({
+      AlertID: i + 1,
+      AlertName: `Alert ${i + 1}`,
+      // ... other fields
+    }));
+    axiosInstance.get.mockResolvedValue({ data: longList });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const input = screen.getByRole('spinbutton');
+    await userEvent.type(input, '2');
+    await userEvent.click(screen.getByRole('button', { name: /Go/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Alert 11')).toBeInTheDocument();
+      expect(toast.success).toHaveBeenCalledWith('Navigated to page 2');
+    });
+  });
+
+  test('shows correct tooltip content', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const alertCell = await screen.findByText('Signal Failure');
+    await userEvent.hover(alertCell);
+
+    await waitFor(() => {
+      const tooltip = screen.getByRole('tooltip');
+      expect(tooltip).toHaveTextContent('Signal Failure');
+    });
+  });
+
+  test('initializes with default sort order (ModifiedAt desc)', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Expect a sort icon on the "Start Date/Time" column
+    const activeSortIcon = await screen.findByTestId('sort-desc'); // or similar
+
+    expect(activeSortIcon).toBeInTheDocument();
+
+    // Optionally check if first row data corresponds to latest ModifiedAt
+    const firstRow = screen.getAllByRole('row')[1]; // [0] is likely <thead>
+    expect(firstRow).toHaveTextContent(/Latest Alert Text/); // adjust accordingly
+  });
+
+  test('fully initializes edit form', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const editButton = (
+      await screen.findAllByRole('button', { name: /Edit/i })
+    )[1];
+    await userEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Alert Name/i)).toHaveValue(
+        'Signal Failure'
+      );
+      expect(screen.getByLabelText(/Start Date\/Time/i)).toHaveValue(
+        '2025-05-18T06:30'
+      );
+      expect(screen.getByLabelText(/Alert Text/i)).toHaveValue(
+        'Signal failure detected at Junction A...'
+      );
+      expect(screen.getByRole('checkbox')).toBeChecked();
+    });
+  });
+
+  test('handles GET API error', async () => {
+    axiosInstance.get.mockRejectedValueOnce(new Error('Network Error'));
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed to fetch alerts');
+      expect(screen.getByText(/No alerts found/i)).toBeInTheDocument();
+    });
+  });
+
+  test('shows correct sorting icons', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const nameHeader = await screen.findByText('Name');
+
+    // Initial state - no sort
+    expect(within(nameHeader).getByTestId('sort-neutral')).toBeInTheDocument();
+
+    // First click - ascending
+    await userEvent.click(nameHeader);
+    expect(within(nameHeader).getByTestId('sort-up')).toBeInTheDocument();
+
+    // Second click - descending
+    await userEvent.click(nameHeader);
+    expect(within(nameHeader).getByTestId('sort-down')).toBeInTheDocument();
+  });
+
+  test('handles empty form submission', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(screen.getByText('Add New Alert'));
+    await userEvent.click(screen.getByText('Create Alert'));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Alert name must be between 3-32 characters'
+      );
+      expect(toast.error).toHaveBeenCalledWith('Alert text cannot be empty');
+    });
+  });
+
+  test('handles date picker edge cases', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(screen.getByText('Add New Alert'));
+
+    // Wait for form to fully render
+    await waitFor(() => {
+      expect(screen.getByText('Create Alert')).toBeInTheDocument();
+      expect(screen.getByLabelText(/start date/i)).toBeInTheDocument();
+    });
+
+    const startDate = screen.getByLabelText(/start date/i);
+    const endDate = screen.getByLabelText(/end date/i);
+
+    fireEvent.change(startDate, { target: { value: '2025-06-01T10:00' } });
+    fireEvent.change(endDate, { target: { value: '2025-06-01T10:00' } });
+
+    await userEvent.click(screen.getByText('Create Alert'));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'End date must be after start date'
+      );
+    });
+  });
+
+  test('edits existing alert', async () => {
+    // Update mock data to ensure proper sorting
+    const sortedMockAlerts = [...mockAlerts].sort(
+      (a, b) => new Date(b.ModifiedAt) - new Date(a.ModifiedAt)
+    );
+    axiosInstance.get.mockResolvedValueOnce({ data: sortedMockAlerts });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const editButtons = await screen.findAllByRole('button', { name: /Edit/i });
+    await userEvent.click(editButtons[0]); // Now clicks the first item after sort
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Alert Name/i)).toHaveValue(
+        sortedMockAlerts[0].AlertName
+      );
+    });
+  });
+
+  test('deletes alert with confirmation', async () => {
+    const sortedMockAlerts = [...mockAlerts].sort(
+      (a, b) => new Date(b.ModifiedAt) - new Date(a.ModifiedAt)
+    );
+    axiosInstance.get.mockResolvedValue({ data: sortedMockAlerts });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await screen.findByText(sortedMockAlerts[0].AlertName);
+    const deleteButtons = await screen.findAllByTestId('delete-button');
+    await userEvent.click(deleteButtons[0]);
+
+    const confirmButton = await screen.findByTestId('confirm-dialog');
+    await userEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(axiosInstance.delete).toHaveBeenCalledWith(
+        `/api/crisisAlerts/${sortedMockAlerts[0].AlertID}`
+      );
+    });
+  });
+
+  test('handles pagination correctly', async () => {
+    // Create 3 items for 2 pages (2 per page)
+    const testAlerts = Array.from({ length: 3 }, (_, i) => ({
+      AlertID: i + 1,
+      AlertName: `Alert ${i + 1}`,
+      StartDateTime: '2025-05-18T06:30:00.000Z',
+      EndDateTime: '2025-05-18T10:30:00.000Z',
+      AlertText: `Alert text ${i + 1}`,
+      IsActive: true,
+      ModifiedAt: '2025-05-19T04:59:46.910Z',
+    }));
+
+    axiosInstance.get.mockResolvedValue({ data: testAlerts });
+
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    // Page 1
+    await screen.findByText('Alert 1');
+    expect(screen.getByText('Alert 2')).toBeInTheDocument();
+    expect(screen.queryByText('Alert 3')).toBeInTheDocument();
+
+    // Go to Page 2
+    const nextButton = screen.getByRole('button', { name: /Next Page/i });
+    await userEvent.click(nextButton);
+    expect(await screen.findByText('Alert 3')).toBeInTheDocument();
+  });
+
+  test('shows sorting indicators correctly', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const nameHeader = await screen.findByText('Name');
+
+    // Initial sort should show neutral icon
+    expect(screen.getByTestId('sort-neutral')).toBeInTheDocument();
+
+    // First click - ascending
+    await userEvent.click(nameHeader);
+    expect(screen.getByTestId('sort-up')).toBeInTheDocument();
+
+    // Second click - descending
+    await userEvent.click(nameHeader);
+    expect(screen.getByTestId('sort-down')).toBeInTheDocument();
+  });
+
+  test('validates all form fields comprehensively', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    await userEvent.click(screen.getByText('Add New Alert'));
+
+    // Test minimum length
+    const nameInput = screen.getByLabelText(/Alert Name\*/i);
+    await userEvent.type(nameInput, 'ab');
+    await userEvent.click(screen.getByText('Create Alert'));
+    expect(toast.error).toHaveBeenCalledWith(
+      'Alert name must be between 3-32 characters'
+    );
+
+    // Test special characters
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, 'Alert@123');
+    await userEvent.click(screen.getByText('Create Alert'));
+    expect(toast.error).toHaveBeenCalledWith('Alert name must be alphanumeric');
+  });
+
+  test('handles invalid page jumps gracefully', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const pageInput = screen.getByRole('spinbutton');
+    const goButton = screen.getByRole('button', { name: /Go/i });
+
+    // Test non-numeric input
+    await userEvent.type(pageInput, 'abc');
+    await userEvent.click(goButton);
+    expect(toast.error).toHaveBeenCalledWith('Page must be between 1 and 0');
+
+    // Test out of range input
+    await userEvent.clear(pageInput);
+    await userEvent.type(pageInput, '999');
+    await userEvent.click(goButton);
+    expect(toast.error).toHaveBeenCalledWith(`Page must be between 1 and 0`);
+  });
+
+  test('toggles tooltip visibility correctly1', async () => {
+    render(
+      <Provider store={store}>
+        <CrisisAlerts />
+      </Provider>
+    );
+
+    const alertName = await screen.findByText('Signal Failure');
+    fireEvent.mouseEnter(alertName);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Signal Failure', {
+          exact: false,
+          selector: '.absolute',
+        })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.mouseLeave(alertName);
+    await waitFor(() => {
+      expect(
+        screen.queryByText('Signal Failure', { selector: '.absolute' })
+      ).not.toBeInTheDocument();
+    });
+  });
+});
+
+FAIL src/__test__/CrisisAlerts.test.js (31.6 s)
+  ● CrisisAlerts Component › validates all form fields comprehensively
+
+    Unable to find a label with the text of: Name
+
+    Ignored nodes: comments, script, style
+    <body>
+      <div>
+        <div
+                      1
+                    </td>
+                    <td
+                      class="px-3 py-4 text-sm text-gray-500 w-[15%] min-w-[120px] max...
+
+      792 |
+      793 |     // Wait for input to appear
+    > 794 |     const alertNameInput = await screen.findByLabelText('Name');
+          |                                         ^
+      795 |
+      796 |     // Test minimum length
+      797 |     await userEvent.type(alertNameInput, 'ab');
+
+      at waitForWrapper (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/wait-for.js:166:27)
+      at findByLabelText (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:86:32)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:794:41)
+
+  ● CrisisAlerts Component › sorts data correctly in both directions
+
+    TestingLibraryElementError: Unable to find an element with the text: Beta. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+    Ignored nodes: comments, script, style
+    <tr>
+      <td
+        class="px-6 py-4 text-center text-sm text-gray-500"
+        colspan="7"
+      >
+        No alerts found
+      </td>
+    </tr>
+
+      833 |     // Initial render (default sort)
+      834 |     let firstRow = screen.getAllByRole('row')[1];
+    > 835 |     expect(within(firstRow).getByText('Beta')).toBeInTheDocument();
+          |                             ^
+      836 |
+      837 |     // Sort ascending
+      838 |     await userEvent.click(nameHeader);
+
+      at Object.getElementError (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/config.js:37:19)
+      at allQuery (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:76:38)
+      at query (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:52:17)
+      at getByText (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:95:19)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:835:29)
+
+  ● CrisisAlerts Component › sorts by start date correctly
+
+    TestingLibraryElementError: Unable to find an element with the text: Older Alert. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+    Ignored nodes: comments, script, style
+    <tr>
+      <td
+        class="px-6 py-4 text-center text-sm text-gray-500"
+        colspan="7"
+      >
+        No alerts found
+      </td>
+    </tr>
+
+      875 |     await userEvent.click(startDateHeader);
+      876 |     let rows = screen.getAllByRole('row');
+    > 877 |     expect(within(rows[1]).getByText('Older Alert')).toBeInTheDocument();
+          |                            ^
+      878 |
+      879 |     // Second click - descending
+      880 |     await userEvent.click(startDateHeader);
+
+      at Object.getElementError (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/config.js:37:19)
+      at allQuery (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:76:38)
+      at query (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:52:17)
+      at getByText (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:95:19)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:877:28)
+
+  ● CrisisAlerts Component › sorts by active status correctly
+
+    expect(received).toHaveTextContent()
+
+    received value must be a Node.
+    Received has type:  object
+    Received has value: {"findAllByAltText": [Function bound ], "findAllByDisplayValue": [Function bound ], "findAllByLabelText": [Function bound ], "findAllByPlaceholderText": [Function bound ], "findAllByRole": [Function bound ], "findAllByTestId": [Function bound ], "findAllByText": [Function bound ], "findAllByTitle": [Function bound ], "findByAltText": [Function bound ], "findByDisplayValue": [Function bound ], "findByLabelText": [Function bound ], "findByPlaceholderText": [Function bound ], "findByRole": [Function bound ], "findByTestId": [Function bound ], "findByText": [Function bound ], "findByTitle": [Function bound ], "getAllByAltText": [Function bound ], "getAllByDisplayValue": [Function bound ], "getAllByLabelText": [Function bound ], "getAllByPlaceholderText": [Function bound ], "getAllByRole": [Function bound ], "getAllByTestId": [Function bound ], "getAllByText": [Function bound ], "getAllByTitle": [Function bound ], "getByAltText": [Function bound ], "getByDisplayValue": [Function bound ], "getByLabelText": [Function bound ], "getByPlaceholderText": [Function bound ], "getByRole": [Function bound ], "getByTestId": [Function bound ], "getByText": [Function bound ], "getByTitle": [Function bound ], "queryAllByAltText": [Function bound ], "queryAllByDisplayValue": [Function bound ], "queryAllByLabelText": [Function bound ], "queryAllByPlaceholderText": [Function bound ], "queryAllByRole": [Function bound ], "queryAllByTestId": [Function bound ], "queryAllByText": [Function bound ], "queryAllByTitle": [Function bound ], "queryByAltText": [Function bound ], "queryByDisplayValue": [Function bound ], "queryByLabelText": [Function bound ], "queryByPlaceholderText": [Function bound ], "queryByRole": [Function bound ], "queryByTestId": [Function bound ], "queryByText": [Function bound ], "queryByTitle": [Function bound ]}
+
+      901 |     await userEvent.click(activeHeader);
+      902 |     let rows = screen.getAllByRole('row');
+    > 903 |     expect(within(rows[1])).toHaveTextContent('Inactive Alert');
+          |                             ^
+      904 |
+      905 |     // Sort descending (true first)
+      906 |     await userEvent.click(activeHeader);
+
+      at __EXTERNAL_MATCHER_TRAP__ (node_modules/react-scripts/node_modules/expect/build/index.js:386:30)
+      at Object.toHaveTextContent (node_modules/react-scripts/node_modules/expect/build/index.js:387:15)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:903:29)
+
+  ● CrisisAlerts Component › handles valid page number input
+
+    Unable to find an element with the text: Alert 11. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+    Ignored nodes: comments, script, style
+    <body>
+
+                    <td
+                      class="px-3 py-4 text-sm text-gray-500 w-[15%] min-w-[120px] max...
+
+      927 |     await userEvent.click(screen.getByRole('button', { name: /Go/i }));
+      928 |
+    > 929 |     await waitFor(() => {
+          |                  ^
+      930 |       expect(screen.getByText('Alert 11')).toBeInTheDocument();
+      931 |       expect(toast.success).toHaveBeenCalledWith('Navigated to page 2');
+      932 |     });
+
+      at waitForWrapper (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/wait-for.js:166:27)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:929:18)
+
+  ● CrisisAlerts Component › shows correct tooltip content
+
+    Unable to find role="tooltip"
+
+    Ignored nodes: comments, script, style
+    <body>
+                    </td>
+                    <td
+                      class="px-3 py-4 text-sm text-gray-500 w-[15%] min-w-[120px] max...
+
+      943 |     await userEvent.hover(alertCell);
+      944 |
+    > 945 |     await waitFor(() => {
+          |                  ^
+      946 |       const tooltip = screen.getByRole('tooltip');
+      947 |       expect(tooltip).toHaveTextContent('Signal Failure');
+      948 |     });
+
+      at waitForWrapper (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/wait-for.js:166:27)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:945:18)
+
+  ● CrisisAlerts Component › initializes with default sort order (ModifiedAt desc)
+
+    Unable to find an element by: [data-testid="sort-desc"]
+
+    Ignored nodes: comments, script, style
+    <body>
+                    </td>
+                    <td
+                      class="px-3 py-4 text-sm text-gray-500 w-[15%] min-w-[120px] max...
+
+      957 |
+      958 |     // Expect a sort icon on the "Start Date/Time" column
+    > 959 |     const activeSortIcon = await screen.findByTestId('sort-desc'); // or similar
+          |                                         ^
+      960 |
+      961 |     expect(activeSortIcon).toBeInTheDocument();
+      962 |
+
+      at waitForWrapper (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/wait-for.js:166:27)
+      at findByTestId (node_modules/@testing-library/react/node_modules/@testing-library/dom/dist/query-helpers.js:86:32)
+      at Object.<anonymous> (src/__test__/CrisisAlerts.test.js:959:41)
+      at TestScheduler.scheduleTests (node_modules/react-scripts/node_modules/@jest/core/build/TestScheduler.js:333:13)
+      at runJest (node_modules/react-scripts/node_modules/@jest/core/build/runJest.js:404:19)
+      at _run10000 (node_modules/react-scripts/node_modules/@jest/core/build/cli/index.js:320:7)
+      at runCLI (node_modules/react-scripts/node_modules/@jest/core/build/cli/index.js:173:3)
+import React, { useState, useEffect } from 'react';
+import axiosInstance from '../api/axios';
+import { toast } from 'react-toastify';
+import { useSelector } from 'react-redux';
+import Dialog from '../components/tools/Dialog';
+import { IoMdClose } from 'react-icons/io';
+import { canModifyModule, shouldShowModule } from '../utils/permissions';
+import {
+  FaEdit,
+  FaTrashAlt,
+  FaAngleLeft,
+  FaAngleRight,
+  FaAngleDoubleLeft,
+  FaAngleDoubleRight,
+} from 'react-icons/fa';
+
+import { FaSort, FaSortUp, FaSortDown } from 'react-icons/fa';
+const CrisisAlerts = () => {
+  const { user } = useSelector((state) => state.session);
+  const hasModifyPermission = canModifyModule(user, 'CrisisAlerts');
+  const hasReadPermission = shouldShowModule(user, 'CrisisAlerts');
+
+  const [alerts, setAlerts] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageInput, setPageInput] = useState('');
+  const [sortConfig, setSortConfig] = useState({
+    key: 'ModifiedAt',
+    direction: 'desc',
+  });
+  const [showForm, setShowForm] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [selectedAlert, setSelectedAlert] = useState(null);
+  const [activeTooltip, setActiveTooltip] = useState(null);
+  const [formData, setFormData] = useState({
+    alertName: '',
+    startDateTime: '',
+    endDateTime: '',
+    alertText: '',
+    isActive: true,
+  });
+
+  const alertsPerPage = 10;
+
+  useEffect(() => {
+    if (hasReadPermission) {
+      fetchAlerts();
+    }
+  }, [hasReadPermission]);
+
+  const fetchAlerts = async () => {
+    try {
+      const response = await axiosInstance.get('/api/crisisAlerts');
+      setAlerts(response.data);
+    } catch (error) {
+      toast.error('Failed to fetch alerts');
+    }
+  };
+
+  const formatDate = (dateString, type = 'datetime') => {
+    const date = new Date(dateString);
+    const optionsDate = { year: 'numeric', month: 'short', day: 'numeric' };
+    const optionsTime = { hour: '2-digit', minute: '2-digit' };
+
+    if (type === 'date') return date.toLocaleDateString(undefined, optionsDate);
+    if (type === 'time') return date.toLocaleTimeString(undefined, optionsTime);
+    return `${date.toLocaleDateString(
+      undefined,
+      optionsDate
+    )} ${date.toLocaleTimeString(undefined, optionsTime)}`;
+  };
+
+  const toggleTooltip = (id) => {
+    setActiveTooltip(activeTooltip === id ? null : id);
+  };
+
+  const renderTableCell = (content, id, maxWidth = '120px') => (
+    <div className="relative group">
+      <div
+        className="truncate cursor-pointer"
+        onClick={() => toggleTooltip(id)}
+        onMouseEnter={() => setActiveTooltip(id)}
+        onMouseLeave={() => setActiveTooltip(null)}
+        style={{ maxWidth }}
+      >
+        {content}
+      </div>
+      {activeTooltip === id && (
+        <div className="absolute z-10 bg-gray-800 text-white text-xs p-2 rounded whitespace-normal break-all max-w-xs bottom-full mb-1">
+          {content}
+        </div>
+      )}
+    </div>
+  );
+
+  const handleSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const sortedAlerts = [...alerts].sort((a, b) => {
+    if (!sortConfig.key) return 0;
+    if (a[sortConfig.key] < b[sortConfig.key])
+      return sortConfig.direction === 'asc' ? -1 : 1;
+    if (a[sortConfig.key] > b[sortConfig.key])
+      return sortConfig.direction === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const indexOfLastAlert = currentPage * alertsPerPage;
+  const indexOfFirstAlert = indexOfLastAlert - alertsPerPage;
+  const currentAlerts = sortedAlerts.slice(indexOfFirstAlert, indexOfLastAlert);
+  const totalPages = Math.ceil(alerts.length / alertsPerPage);
+
+  const goToPage = (page) => {
+    if (page >= 1 && page <= totalPages) setCurrentPage(page);
+  };
+
+  const handlePageInputChange = (e) => setPageInput(e.target.value);
+
+  // const handlePageJump = () => {
+  //   const page = Number(pageInput);
+  //   if (page >= 1 && page <= totalPages) goToPage(page);
+  //   setPageInput('');
+  // };
+
+  const handlePageJump = () => {
+    const page = Number(pageInput);
+
+    if (page < 1 || page > totalPages) {
+      toast.error(`Page must be between 1 and ${totalPages}`);
+      setPageInput('');
+      return;
+    }
+
+    goToPage(page);
+    setPageInput('');
+    toast.success(`Navigated to page ${page}`);
+  };
+
+  const handleDelete = async (alertId) => {
+    try {
+      await axiosInstance.delete(`/api/crisisAlerts/${alertId}`);
+      toast.success('Alert deleted successfully');
+      fetchAlerts();
+    } catch (error) {
+      toast.error('Failed to delete alert');
+    }
+    setShowDeleteConfirm(false);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formValidation()) return;
+
+    try {
+      const payload = {
+        ...formData,
+        startDateTime: new Date(formData.startDateTime).toISOString(),
+        endDateTime: new Date(formData.endDateTime).toISOString(),
+      };
+
+      if (selectedAlert) {
+        await axiosInstance.patch(
+          `/api/crisisAlerts/${selectedAlert.AlertID}`,
+          payload
+        );
+        toast.success('Alert updated successfully');
+      } else {
+        await axiosInstance.post('/api/crisisAlerts', payload);
+        toast.success('Alert created successfully');
+      }
+
+      setShowForm(false);
+      fetchAlerts();
+      resetForm();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Operation failed');
+    }
+  };
+
+  const formValidation = () => {
+    const errors = [];
+
+    if (formData.alertName.length < 3 || formData.alertName.length > 32) {
+      errors.push('Alert name must be between 3-32 characters');
+    }
+
+    if (!/^[a-zA-Z0-9 ]*$/.test(formData.alertName)) {
+      errors.push('Alert name must be alphanumeric');
+    }
+
+    if (new Date(formData.startDateTime) >= new Date(formData.endDateTime)) {
+      errors.push('End date must be after start date');
+    }
+
+    if (!formData.alertText.trim()) {
+      errors.push('Alert text cannot be empty');
+    }
+
+    if (errors.length > 0) {
+      errors.forEach((error) => toast.error(error));
+      return false;
+    }
+    return true;
+  };
+
+  const resetForm = () => {
+    setFormData({
+      alertName: '',
+      startDateTime: '',
+      endDateTime: '',
+      alertText: '',
+      isActive: true,
+    });
+    setSelectedAlert(null);
+  };
+
+  const openEditForm = (alert) => {
+    setSelectedAlert(alert);
+    setFormData({
+      alertName: alert.AlertName,
+      startDateTime: alert.StartDateTime.slice(0, 16),
+      endDateTime: alert.EndDateTime.slice(0, 16),
+      alertText: alert.AlertText,
+      isActive: alert.IsActive,
+    });
+    setShowForm(true);
+  };
+
+  return (
+    <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-6 h-full overflow-y-auto">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold text-gray-800">Crisis Alerts</h1>
+        {hasModifyPermission && (
+          <button
+            onClick={() => setShowForm(true)}
+            className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+          >
+            Add New Alert
+          </button>
+        )}
+      </div>
+
+      <div className="bg-white rounded-lg shadow-md overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[5%]">
+                  Sr.No
+                </th>
+                <th
+                  className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%] cursor-pointer"
+                  onClick={() => handleSort('AlertName')}
+                >
+                  <div className="flex items-center gap-1">
+                    Name
+                    {sortConfig.key === 'AlertName' ? (
+                      sortConfig.direction === 'asc' ? (
+                        <FaSortUp data-testid="sort-up" className="w-3 h-3" />
+                      ) : (
+                        <FaSortDown
+                          data-testid="sort-down"
+                          className="w-3 h-3"
+                        />
+                      )
+                    ) : (
+                      <FaSort data-testid="sort-neutral" className="w-3 h-3" />
+                    )}
+                  </div>
+                </th>
+                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[35%]">
+                  Alert Text
+                </th>
+                <th
+                  className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[10%] cursor-pointer"
+                  onClick={() => handleSort('StartDateTime')}
+                >
+                  <div className="flex items-center gap-1">
+                    Start Date/Time
+                    {sortConfig.key === 'StartDateTime' ? (
+                      sortConfig.direction === 'asc' ? (
+                        <FaSortUp className="w-3 h-3" />
+                      ) : (
+                        <FaSortDown className="w-3 h-3" />
+                      )
+                    ) : (
+                      <FaSort className="w-3 h-3" />
+                    )}
+                  </div>
+                </th>
+                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[10%]">
+                  End Date/Time
+                </th>
+                <th
+                  className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[10%] cursor-pointer"
+                  onClick={() => handleSort('IsActive')}
+                >
+                  <div className="flex items-center gap-1">
+                    Active
+                    {sortConfig.key === 'IsActive' ? (
+                      sortConfig.direction === 'asc' ? (
+                        <FaSortUp className="w-3 h-3" />
+                      ) : (
+                        <FaSortDown className="w-3 h-3" />
+                      )
+                    ) : (
+                      <FaSort className="w-3 h-3" />
+                    )}
+                  </div>
+                </th>
+                {hasModifyPermission && (
+                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[10%]">
+                    Actions
+                  </th>
+                )}
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {currentAlerts.length > 0 ? (
+                currentAlerts.map((alert, index) => (
+                  <tr key={alert.AlertID} className="hover:bg-gray-50">
+                    <td className="px-3 py-4 text-sm text-gray-500 w-[5%] min-w-[40px]">
+                      {(currentPage - 1) * alertsPerPage + index + 1}
+                    </td>
+                    <td className="px-3 py-4 text-sm text-gray-500 w-[15%] min-w-[120px] max-w-[120px]">
+                      <div className="relative group">
+                        <div
+                          className="cursor-pointer"
+                          onClick={() => toggleTooltip(`name-${alert.AlertID}`)}
+                          onMouseEnter={() =>
+                            setActiveTooltip(`name-${alert.AlertID}`)
+                          }
+                          onMouseLeave={() => setActiveTooltip(null)}
+                        >
+                          {alert.AlertName}
+                        </div>
+                        {activeTooltip === `name-${alert.AlertID}` && (
+                          <div className="absolute z-10 bg-gray-800 text-white text-xs p-2 rounded whitespace-normal break-all max-w-xs bottom-full mb-1">
+                            {alert.AlertName}
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-4 text-sm text-gray-500 w-[35%] min-w-[200px] max-w-[200px]">
+                      <div className="whitespace-normal break-words max-h-[100px] overflow-y-auto">
+                        {alert.AlertText}
+                      </div>
+                    </td>
+                    <td className="px-3 py-4 text-sm text-gray-500 w-[10%] min-w-[100px]">
+                      <div className="flex flex-col">
+                        <span>{formatDate(alert.StartDateTime, 'date')}</span>
+                        <span className="text-xs text-gray-400">
+                          {formatDate(alert.StartDateTime, 'time')}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-4 text-sm text-gray-500 w-[10%] min-w-[100px]">
+                      <div className="flex flex-col">
+                        <span>{formatDate(alert.EndDateTime, 'date')}</span>
+                        <span className="text-xs text-gray-400">
+                          {formatDate(alert.EndDateTime, 'time')}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-4 text-sm text-gray-500 w-[10%] min-w-[80px]">
+                      {alert.IsActive ? 'Yes' : 'No'}
+                    </td>
+                    {hasModifyPermission && (
+                      <td className="px-3 py-4 text-sm font-medium w-[10%] min-w-[80px]">
+                        <div className="flex space-x-4">
+                          <button
+                            onClick={() => openEditForm(alert)}
+                            data-testid="edit-button"
+                            className="text-blue-600 hover:text-blue-800"
+                            title="Edit"
+                          >
+                            <FaEdit className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedAlert(alert);
+                              setShowDeleteConfirm(true);
+                            }}
+                            data-testid="delete-button"
+                            className="text-red-600 hover:text-red-900"
+                            title="Delete"
+                          >
+                            <FaTrashAlt className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td
+                    colSpan={hasModifyPermission ? 7 : 6}
+                    className="px-6 py-4 text-center text-sm text-gray-500"
+                  >
+                    No alerts found
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex justify-between items-center mb-4 mt-6 px-4 py-3 border-t border-gray-200">
+          <div className="text-sm text-gray-500">
+            Showing {(currentPage - 1) * alertsPerPage + 1} to{' '}
+            {Math.min(currentPage * alertsPerPage, alerts.length)} of{' '}
+            {alerts.length} entries
+          </div>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => goToPage(1)}
+              disabled={currentPage === 1}
+              className="p-2 rounded-md border border-gray-300 hover:bg-gray-100 disabled:opacity-50 disabled:hover:bg-transparent"
+              title="First Page"
+            >
+              <FaAngleDoubleLeft className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => goToPage(currentPage - 1)}
+              disabled={currentPage === 1}
+              className="p-2 rounded-md border border-gray-300 hover:bg-gray-100 disabled:opacity-50 disabled:hover:bg-transparent"
+              title="Previous Page"
+            >
+              <FaAngleLeft className="h-4 w-4" />
+            </button>
+            <span className="text-sm flex items-center space-x-2">
+              <span>Page</span>
+              <input
+                type="number"
+                min="1"
+                max={totalPages}
+                value={pageInput}
+                onChange={handlePageInputChange}
+                className="w-16 px-2 py-1 border border-gray-300 rounded-md text-center"
+              />
+              <span>of {totalPages}</span>
+            </span>
+            <button
+              onClick={handlePageJump}
+              className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+            >
+              Go
+            </button>
+            <button
+              onClick={() => goToPage(currentPage + 1)}
+              disabled={currentPage === totalPages}
+              className="p-2 rounded-md border border-gray-300 hover:bg-gray-100 disabled:opacity-50 disabled:hover:bg-transparent"
+              title="Next Page"
+            >
+              <FaAngleRight className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => goToPage(totalPages)}
+              disabled={currentPage === totalPages}
+              className="p-2 rounded-md border border-gray-300 hover:bg-gray-100 disabled:opacity-50 disabled:hover:bg-transparent"
+              title="Last Page"
+            >
+              <FaAngleDoubleRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Add/Edit Form Modal */}
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="fixed inset-0 bg-black/50"></div>
+          <div className="relative z-50 w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-gray-900">
+                {selectedAlert ? 'Edit Alert' : 'Add New Alert'}
+              </h2>
+              <button
+                onClick={() => {
+                  setShowForm(false);
+                  resetForm();
+                }}
+                className="rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              >
+                <IoMdClose className="h-6 w-6" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Alert Name*
+                    <input
+                      type="text"
+                      value={formData.alertName}
+                      onChange={(e) =>
+                        setFormData({ ...formData, alertName: e.target.value })
+                      }
+                      className="border rounded px-3 py-2 w-full mt-1"
+                      required
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label
+                      className="block text-sm font-medium text-gray-700 mb-1"
+                      htmlFor="start"
+                    >
+                      Start Date/Time*
+                      <input
+                        id="start"
+                        type="datetime-local"
+                        value={formData.startDateTime}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            startDateTime: e.target.value,
+                          })
+                        }
+                        className="border rounded px-3 py-2 w-full mt-1"
+                        required
+                      />
+                    </label>
+                  </div>
+                  <div>
+                    <label
+                      className="block text-sm font-medium text-gray-700 mb-1"
+                      htmlFor="end"
+                    >
+                      End Date/Time*
+                      <input
+                        id="end"
+                        type="datetime-local"
+                        value={formData.endDateTime}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            endDateTime: e.target.value,
+                          })
+                        }
+                        className="border rounded px-3 py-2 w-full mt-1"
+                        required
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Alert Text*
+                    <textarea
+                      value={formData.alertText}
+                      onChange={(e) =>
+                        setFormData({ ...formData, alertText: e.target.value })
+                      }
+                      className="border rounded px-3 py-2 w-full mt-1 h-32"
+                      required
+                    />
+                  </label>
+                </div>
+
+                <div className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={formData.isActive}
+                    onChange={(e) =>
+                      setFormData({ ...formData, isActive: e.target.checked })
+                    }
+                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                  />
+                  <label className="ml-2 block text-sm text-gray-700">
+                    Active
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowForm(false);
+                    resetForm();
+                  }}
+                  className="rounded-md bg-gray-100 px-4 py-2 text-gray-700 hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {selectedAlert ? 'Save Changes' : 'Create Alert'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog
+        isOpen={showDeleteConfirm}
+        onClose={() => setShowDeleteConfirm(false)}
+        onConfirm={() => handleDelete(selectedAlert.AlertID)}
+        title="Confirm Delete"
+        message="Are you sure you want to delete this alert?"
+        confirmButton="Delete Alert"
+      />
+    </div>
+  );
+};
+
+export default CrisisAlerts;

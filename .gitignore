@@ -1,0 +1,13 @@
+# Rust / Cargo
+target/
+**/target/
+Cargo.lock
+
+# Rustfmt backups
+**/*.rs.bk
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo

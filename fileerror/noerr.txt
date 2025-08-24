@@ -1,0 +1,13 @@
+› cargo run
+warning: unused variable: `greeting_file`
+ --> src/main.rs:6:9
+  |
+6 |     let greeting_file = match greeting_file_result {
+  |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_greeting_file`
+  |
+  = note: `#[warn(unused_variables)]` on by default
+
+warning: `fileerror` (bin "fileerror") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/fileerror`
+

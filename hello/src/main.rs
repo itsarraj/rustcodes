@@ -1,3 +1,7 @@
+// src/main.rs
+
+use guess_test::Guess;
+
 fn main() {
-    println!("Hello, world!");
+    let _ = Guess::new(1111); // Just a valid usage
 }
