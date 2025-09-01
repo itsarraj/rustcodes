@@ -1,10 +1,20 @@
-use std::sync::Mutex; 
+use std::sync::{Arc, Mutex}; 
+use std::thread;
 
 fn main() { 
-    let m = Mutex::new(5); 
-    { 
-        let mut num = m.lock().unwrap(); 
-        *num = 6; 
-    } 
-    println!("m = {:?}", m); 
+
+    let mut num = 5; 
+
+    let r1 = &num as *const i32; 
+    let r2 = &mut num as *mut i32;
+    println!("Result:=- {:#?}", num);
+    println!("Result:=- {:#?}", r1);
+    println!("Result:=- {:#?}", r2);
+    let mut num = 5; 
+    let r1 = &num as *const i32; 
+    let r2 = &mut num as *mut i32;
+    println!("Result:=- {:#?}", num);
+    println!("Result:=- {:#?}", r1);
+    println!("Result:=- {:#?}", r2);
+
 }
